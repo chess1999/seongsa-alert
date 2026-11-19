@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server';
+import https from 'https';
 import * as cheerio from 'cheerio';
 import webpush from 'web-push';
 import { redis } from '@/lib/redis';
 
 export const dynamic = 'force-dynamic';
+export const preferredRegion = 'icn1'; // 서울 서버로 실행
 
 const SLOTS = [
   '06:00~08:00', '08:00~10:00', '10:00~12:00', '12:00~14:00',
@@ -16,6 +18,36 @@ const FETCH_HEADERS = {
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
 };
+
+function fetchHtml(url) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        headers: FETCH_HEADERS,
+        rejectUnauthorized: false, // 공공기관 SSL 인증서 오류 우회
+        timeout: 10000,
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return resolve(fetchHtml(res.headers.location));
+        }
+        if (res.statusCode !== 200) {
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        }
+        res.setEncoding('utf8');
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => resolve(data));
+      }
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Timeout'));
+    });
+  });
+}
 
 function getKstNow() {
   const now = new Date();
@@ -84,15 +116,7 @@ export async function GET() {
 
   for (const dateStr of candidateDates) {
     try {
-      const res = await fetch(`https://www.gytennis.or.kr/daily/4/${dateStr}`, {
-        cache: 'no-store',
-        headers: FETCH_HEADERS,
-      });
-      if (!res.ok) {
-        debug.push({ dateStr, httpStatus: res.status });
-        continue;
-      }
-      const html = await res.text();
+      const html = await fetchHtml(`https://www.gytennis.or.kr/daily/4/${dateStr}`);
       const $ = cheerio.load(html);
 
       const openBySlot = {};
