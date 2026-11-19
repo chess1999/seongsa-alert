@@ -23,10 +23,6 @@ const matchDate = (s, r) => {
 };
 
 export async function GET() {
-  export async function GET() {
-  const kst = getKst();
-  await redis.set('last_heartbeat', { time: Date.now(), kst: kst.toISOString().replace('T', ' ').slice(0, 19) });
-  const today = kst.toISOString().slice(0, 10);
   const kst = getKst();
   const today = kst.toISOString().slice(0, 10);
   const dnd = (await redis.get('dnd')) || { enabled: true, start: '01:00', end: '05:30' };
