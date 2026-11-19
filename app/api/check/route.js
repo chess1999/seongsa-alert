@@ -53,7 +53,6 @@ function getCandidateDates(kst, rules) {
   return dates;
 }
 
-// 회사 PC가 "오늘 어떤 날짜들 확인하면 돼?" 하고 물어보는 곳
 export async function GET() {
   const kst = getKstNow();
   const todayStr = kst.toISOString().slice(0, 10);
@@ -75,7 +74,6 @@ export async function GET() {
   return NextResponse.json({ status: 'ok', dates: candidateDates });
 }
 
-// 회사 PC가 긁어온 고양시 사이트 화면을 받아서 빈자리 체크 & 푸시 발송하는 곳
 export async function POST(req) {
   const { pages } = await req.json();
   const rules = (await redis.get('rules')) || [];
@@ -126,56 +124,3 @@ export async function POST(req) {
           }
         }
       } else {
-        const newlyOpened = [];
-        for (const s of allowed) {
-          if (!openBySlot[s]) continue;
-          const newCourts = openBySlot[s].filter((c) => !prevOpen.has(`${dateStr}|${c}|${s}`));
-          if (newCourts.length > 0) {
-            newlyOpened.push(`${SLOTS[s]}(${newCourts.join(',')}번)`);
-          }
-        }
-        if (newlyOpened.length > 0) {
-          alertsToSend.push({
-            dateStr,
-            title: `[빈자리] 성사전천후 ${dateStr}`,
-            body: newlyOpened.join(' / '),
-            url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
-          });
-        }
-      }
-    }
-  }
-
-  await redis.set('prev_open_slots', Array.from(currentOpen));
-
-  if (alertsToSend.length > 0) {
-    webpush.setVapidDetails(
-      'mailto:seongsa.alert@gmail.com',',
-      process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
-      process.env.VAPID_PRIVATE_KEY
-    );
-    const subs = (await redis.get('subscriptions')) || [];
-    const activeSubs = [];
-
-    for (const sub of subs) {
-      let ok = true;
-      for (const alert of alertsToSend) {
-        try {
-          await webpush.sendNotification(sub, JSON.stringify(alert));
-        } catch (err) {
-          if (err.statusCode === 410 || err.statusCode === 404) ok = false;
-        }
-      }
-      if (ok) activeSubs.push(sub);
-    }
-    if (activeSubs.length !== subs.length) {
-      await redis.set('subscriptions', activeSubs);
-    }
-  }
-
-  return NextResponse.json({
-    status: 'ok',
-    openFound: currentOpen.size,
-    alerts: alertsToSend.length,
-  });
-}
