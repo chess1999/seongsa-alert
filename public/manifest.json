@@ -1,0 +1,8 @@
+{
+  "name": "성사코트 알림",
+  "short_name": "성사알림",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1d4ed8"
+}
