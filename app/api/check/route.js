@@ -124,3 +124,6 @@ export async function POST(req) {
           }
         }
       } else {
+        const newlyOpened = [];
+        for (const s of allowed) {
+          if (!openBySlot[s]) continue;
