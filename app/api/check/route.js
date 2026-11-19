@@ -11,6 +11,12 @@ const SLOTS = [
 ];
 const TARGET_COURTS = ['9', '10', '11'];
 
+const FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+};
+
 function getKstNow() {
   const now = new Date();
   return new Date(now.getTime() + 9 * 60 * 60 * 1000);
@@ -41,6 +47,18 @@ function dateMatchesRule(dateStr, rule) {
   return false;
 }
 
+function getCandidateDates(kst, rules) {
+  const dates = [];
+  for (let i = 0; i <= 40; i++) {
+    const d = new Date(kst.getTime() + i * 24 * 60 * 60 * 1000);
+    const dateStr = d.toISOString().slice(0, 10);
+    if (rules.some((r) => dateMatchesRule(dateStr, r))) {
+      dates.push(dateStr);
+    }
+  }
+  return dates;
+}
+
 export async function GET() {
   const kst = getKstNow();
   const todayStr = kst.toISOString().slice(0, 10);
@@ -51,7 +69,6 @@ export async function GET() {
   }
 
   let rules = (await redis.get('rules')) || [];
-  // 지난 특정 날짜 자동 정리
   const validRules = rules.filter((r) => r.mode !== 'date' || r.date >= todayStr);
   if (validRules.length !== rules.length) {
     await redis.set('rules', validRules);
@@ -59,92 +76,86 @@ export async function GET() {
   }
   if (rules.length === 0) return NextResponse.json({ status: 'no_rules' });
 
-  // 1. 메인 페이지에서 잔여 코트 요약(#ensdat) 조회
-  const mainRes = await fetch('https://www.gytennis.or.kr/daily/4', { cache: 'no-store' });
-  const mainHtml = await mainRes.text();
-  const $main = cheerio.load(mainHtml);
-  const ensdatRaw = $main('#ensdat').val();
-  if (!ensdatRaw) return NextResponse.json({ status: 'no_ensdat' });
-
-  const summary = JSON.parse(ensdatRaw);
-  const candidateDates = summary
-    .filter((item) => Number(item.total_cnt) > 0)
-    .map((item) => item.date)
-    .filter((dateStr) => rules.some((r) => dateMatchesRule(dateStr, r)));
-
+  const candidateDates = getCandidateDates(kst, rules);
   const prevOpen = new Set((await redis.get('prev_open_slots')) || []);
   const currentOpen = new Set();
   const alertsToSend = [];
+  const debug = [];
 
-  // 2. 조건에 맞고 잔여가 있는 날짜만 상세 조회
   for (const dateStr of candidateDates) {
-    const res = await fetch(`https://www.gytennis.or.kr/daily/4/${dateStr}`, { cache: 'no-store' });
-    const html = await res.text();
-    const $ = cheerio.load(html);
-
-    // slotIndex -> [courtNumbers]
-    const openBySlot = {};
-    $('table.innerCustom').each((_, tbl) => {
-      const courtNum = $(tbl).find('.courtTag').text().replace(/[^0-9]/g, '');
-      if (!TARGET_COURTS.includes(courtNum)) return;
-
-      $(tbl).find('tr').slice(1).each((slotIdx, tr) => {
-        if ($(tr).find('.public-empty-slot').length > 0) {
-          if (!openBySlot[slotIdx]) openBySlot[slotIdx] = [];
-          openBySlot[slotIdx].push(courtNum);
-          currentOpen.add(`${dateStr}|${courtNum}|${slotIdx}`);
-        }
+    try {
+      const res = await fetch(`https://www.gytennis.or.kr/daily/4/${dateStr}`, {
+        cache: 'no-store',
+        headers: FETCH_HEADERS,
       });
-    });
+      if (!res.ok) {
+        debug.push({ dateStr, httpStatus: res.status });
+        continue;
+      }
+      const html = await res.text();
+      const $ = cheerio.load(html);
 
-    // 3. 등록된 조건과 대조
-    const matchedRules = rules.filter((r) => dateMatchesRule(dateStr, r));
-    for (const rule of matchedRules) {
-      const allowed = getAllowedSlotIndices(rule.timeType, rule.exactSlot);
+      const openBySlot = {};
+      $('table.innerCustom').each((_, tbl) => {
+        const courtNum = $(tbl).find('.courtTag').text().replace(/[^0-9]/g, '');
+        if (!TARGET_COURTS.includes(courtNum)) return;
 
-      if (rule.consecutiveOnly) {
-        // 연속 2회차(4시간) 감시
-        for (let i = 0; i < allowed.length - 1; i++) {
-          const s1 = allowed[i];
-          const s2 = allowed[i + 1];
-          if (s2 === s1 + 1 && openBySlot[s1]?.length && openBySlot[s2]?.length) {
-            const hasNew = openBySlot[s1].some((c) => !prevOpen.has(`${dateStr}|${c}|${s1}`)) ||
-                           openBySlot[s2].some((c) => !prevOpen.has(`${dateStr}|${c}|${s2}`));
-            if (hasNew) {
-              alertsToSend.push({
-                dateStr,
-                title: `[연속 4시간] 성사전천후 ${dateStr}`,
-                body: `${SLOTS[s1]}(${openBySlot[s1].join(',')}번) + ${SLOTS[s2]}(${openBySlot[s2].join(',')}번)`,
-                url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
-              });
+        $(tbl).find('tr').slice(1).each((slotIdx, tr) => {
+          if ($(tr).find('.public-empty-slot').length > 0) {
+            if (!openBySlot[slotIdx]) openBySlot[slotIdx] = [];
+            openBySlot[slotIdx].push(courtNum);
+            currentOpen.add(`${dateStr}|${courtNum}|${slotIdx}`);
+          }
+        });
+      });
+
+      const matchedRules = rules.filter((r) => dateMatchesRule(dateStr, r));
+      for (const rule of matchedRules) {
+        const allowed = getAllowedSlotIndices(rule.timeType, rule.exactSlot);
+
+        if (rule.consecutiveOnly) {
+          for (let i = 0; i < allowed.length - 1; i++) {
+            const s1 = allowed[i];
+            const s2 = allowed[i + 1];
+            if (s2 === s1 + 1 && openBySlot[s1]?.length && openBySlot[s2]?.length) {
+              const hasNew = openBySlot[s1].some((c) => !prevOpen.has(`${dateStr}|${c}|${s1}`)) ||
+                             openBySlot[s2].some((c) => !prevOpen.has(`${dateStr}|${c}|${s2}`));
+              if (hasNew) {
+                alertsToSend.push({
+                  dateStr,
+                  title: `[연속 4시간] 성사전천후 ${dateStr}`,
+                  body: `${SLOTS[s1]}(${openBySlot[s1].join(',')}번) + ${SLOTS[s2]}(${openBySlot[s2].join(',')}번)`,
+                  url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
+                });
+              }
             }
           }
-        }
-      } else {
-        // 일반 1회차 감시
-        const newlyOpened = [];
-        for (const s of allowed) {
-          if (!openBySlot[s]) continue;
-          const newCourts = openBySlot[s].filter((c) => !prevOpen.has(`${dateStr}|${c}|${s}`));
-          if (newCourts.length > 0) {
-            newlyOpened.push(`${SLOTS[s]}(${newCourts.join(',')}번)`);
+        } else {
+          const newlyOpened = [];
+          for (const s of allowed) {
+            if (!openBySlot[s]) continue;
+            const newCourts = openBySlot[s].filter((c) => !prevOpen.has(`${dateStr}|${c}|${s}`));
+            if (newCourts.length > 0) {
+              newlyOpened.push(`${SLOTS[s]}(${newCourts.join(',')}번)`);
+            }
+          }
+          if (newlyOpened.length > 0) {
+            alertsToSend.push({
+              dateStr,
+              title: `[빈자리] 성사전천후 ${dateStr}`,
+              body: newlyOpened.join(' / '),
+              url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
+            });
           }
         }
-        if (newlyOpened.length > 0) {
-          alertsToSend.push({
-            dateStr,
-            title: `[빈자리] 성사전천후 ${dateStr}`,
-            body: newlyOpened.join(' / '),
-            url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
-          });
-        }
       }
+    } catch (e) {
+      debug.push({ dateStr, error: e.message });
     }
   }
 
   await redis.set('prev_open_slots', Array.from(currentOpen));
 
-  // 4. 웹 푸시 발송
   if (alertsToSend.length > 0) {
     webpush.setVapidDetails(
       'mailto:admin@seongsa-alert.local',
@@ -170,5 +181,11 @@ export async function GET() {
     }
   }
 
-  return NextResponse.json({ status: 'ok', checked: candidateDates.length, alerts: alertsToSend.length });
+  return NextResponse.json({
+    status: 'ok',
+    checkedDates: candidateDates,
+    openFound: currentOpen.size,
+    alerts: alertsToSend.length,
+    debug,
+  });
 }
