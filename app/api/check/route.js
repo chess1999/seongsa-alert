@@ -150,7 +150,7 @@ export async function POST(req) {
 
   if (alertsToSend.length > 0) {
     webpush.setVapidDetails(
-      ''mailto:seongsa.alert@gmail.com',',
+      'mailto:seongsa.alert@gmail.com',',
       process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
       process.env.VAPID_PRIVATE_KEY
     );
