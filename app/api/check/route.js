@@ -1,53 +1,15 @@
 import { NextResponse } from 'next/server';
-import https from 'https';
 import * as cheerio from 'cheerio';
 import webpush from 'web-push';
 import { redis } from '@/lib/redis';
 
 export const dynamic = 'force-dynamic';
-export const preferredRegion = 'icn1'; // 서울 서버로 실행
 
 const SLOTS = [
   '06:00~08:00', '08:00~10:00', '10:00~12:00', '12:00~14:00',
   '14:00~16:00', '16:00~18:00', '18:00~20:00', '20:00~22:00'
 ];
 const TARGET_COURTS = ['9', '10', '11'];
-
-const FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-};
-
-function fetchHtml(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(
-      url,
-      {
-        headers: FETCH_HEADERS,
-        rejectUnauthorized: false, // 공공기관 SSL 인증서 오류 우회
-        timeout: 10000,
-      },
-      (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          return resolve(fetchHtml(res.headers.location));
-        }
-        if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode}`));
-        }
-        res.setEncoding('utf8');
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve(data));
-      }
-    );
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Timeout'));
-    });
-  });
-}
 
 function getKstNow() {
   const now = new Date();
@@ -91,13 +53,14 @@ function getCandidateDates(kst, rules) {
   return dates;
 }
 
+// 회사 PC가 "오늘 어떤 날짜들 확인하면 돼?" 하고 물어보는 곳
 export async function GET() {
   const kst = getKstNow();
   const todayStr = kst.toISOString().slice(0, 10);
 
   const dnd = (await redis.get('dnd')) || { enabled: true, start: '01:00', end: '05:30' };
   if (isInDnd(dnd, kst)) {
-    return NextResponse.json({ status: 'skipped_dnd' });
+    return NextResponse.json({ status: 'skipped_dnd', dates: [] });
   }
 
   let rules = (await redis.get('rules')) || [];
@@ -106,75 +69,80 @@ export async function GET() {
     await redis.set('rules', validRules);
     rules = validRules;
   }
-  if (rules.length === 0) return NextResponse.json({ status: 'no_rules' });
+  if (rules.length === 0) return NextResponse.json({ status: 'no_rules', dates: [] });
 
   const candidateDates = getCandidateDates(kst, rules);
+  return NextResponse.json({ status: 'ok', dates: candidateDates });
+}
+
+// 회사 PC가 긁어온 고양시 사이트 화면을 받아서 빈자리 체크 & 푸시 발송하는 곳
+export async function POST(req) {
+  const { pages } = await req.json();
+  const rules = (await redis.get('rules')) || [];
+  if (!pages || rules.length === 0) {
+    return NextResponse.json({ status: 'nothing_to_check' });
+  }
+
   const prevOpen = new Set((await redis.get('prev_open_slots')) || []);
   const currentOpen = new Set();
   const alertsToSend = [];
-  const debug = [];
 
-  for (const dateStr of candidateDates) {
-    try {
-      const html = await fetchHtml(`https://www.gytennis.or.kr/daily/4/${dateStr}`);
-      const $ = cheerio.load(html);
+  for (const [dateStr, html] of Object.entries(pages)) {
+    const $ = cheerio.load(html);
+    const openBySlot = {};
 
-      const openBySlot = {};
-      $('table.innerCustom').each((_, tbl) => {
-        const courtNum = $(tbl).find('.courtTag').text().replace(/[^0-9]/g, '');
-        if (!TARGET_COURTS.includes(courtNum)) return;
+    $('table.innerCustom').each((_, tbl) => {
+      const courtNum = $(tbl).find('.courtTag').text().replace(/[^0-9]/g, '');
+      if (!TARGET_COURTS.includes(courtNum)) return;
 
-        $(tbl).find('tr').slice(1).each((slotIdx, tr) => {
-          if ($(tr).find('.public-empty-slot').length > 0) {
-            if (!openBySlot[slotIdx]) openBySlot[slotIdx] = [];
-            openBySlot[slotIdx].push(courtNum);
-            currentOpen.add(`${dateStr}|${courtNum}|${slotIdx}`);
-          }
-        });
+      $(tbl).find('tr').slice(1).each((slotIdx, tr) => {
+        if ($(tr).find('.public-empty-slot').length > 0) {
+          if (!openBySlot[slotIdx]) openBySlot[slotIdx] = [];
+          openBySlot[slotIdx].push(courtNum);
+          currentOpen.add(`${dateStr}|${courtNum}|${slotIdx}`);
+        }
       });
+    });
 
-      const matchedRules = rules.filter((r) => dateMatchesRule(dateStr, r));
-      for (const rule of matchedRules) {
-        const allowed = getAllowedSlotIndices(rule.timeType, rule.exactSlot);
+    const matchedRules = rules.filter((r) => dateMatchesRule(dateStr, r));
+    for (const rule of matchedRules) {
+      const allowed = getAllowedSlotIndices(rule.timeType, rule.exactSlot);
 
-        if (rule.consecutiveOnly) {
-          for (let i = 0; i < allowed.length - 1; i++) {
-            const s1 = allowed[i];
-            const s2 = allowed[i + 1];
-            if (s2 === s1 + 1 && openBySlot[s1]?.length && openBySlot[s2]?.length) {
-              const hasNew = openBySlot[s1].some((c) => !prevOpen.has(`${dateStr}|${c}|${s1}`)) ||
-                             openBySlot[s2].some((c) => !prevOpen.has(`${dateStr}|${c}|${s2}`));
-              if (hasNew) {
-                alertsToSend.push({
-                  dateStr,
-                  title: `[연속 4시간] 성사전천후 ${dateStr}`,
-                  body: `${SLOTS[s1]}(${openBySlot[s1].join(',')}번) + ${SLOTS[s2]}(${openBySlot[s2].join(',')}번)`,
-                  url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
-                });
-              }
+      if (rule.consecutiveOnly) {
+        for (let i = 0; i < allowed.length - 1; i++) {
+          const s1 = allowed[i];
+          const s2 = allowed[i + 1];
+          if (s2 === s1 + 1 && openBySlot[s1]?.length && openBySlot[s2]?.length) {
+            const hasNew = openBySlot[s1].some((c) => !prevOpen.has(`${dateStr}|${c}|${s1}`)) ||
+                           openBySlot[s2].some((c) => !prevOpen.has(`${dateStr}|${c}|${s2}`));
+            if (hasNew) {
+              alertsToSend.push({
+                dateStr,
+                title: `[연속 4시간] 성사전천후 ${dateStr}`,
+                body: `${SLOTS[s1]}(${openBySlot[s1].join(',')}번) + ${SLOTS[s2]}(${openBySlot[s2].join(',')}번)`,
+                url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
+              });
             }
-          }
-        } else {
-          const newlyOpened = [];
-          for (const s of allowed) {
-            if (!openBySlot[s]) continue;
-            const newCourts = openBySlot[s].filter((c) => !prevOpen.has(`${dateStr}|${c}|${s}`));
-            if (newCourts.length > 0) {
-              newlyOpened.push(`${SLOTS[s]}(${newCourts.join(',')}번)`);
-            }
-          }
-          if (newlyOpened.length > 0) {
-            alertsToSend.push({
-              dateStr,
-              title: `[빈자리] 성사전천후 ${dateStr}`,
-              body: newlyOpened.join(' / '),
-              url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
-            });
           }
         }
+      } else {
+        const newlyOpened = [];
+        for (const s of allowed) {
+          if (!openBySlot[s]) continue;
+          const newCourts = openBySlot[s].filter((c) => !prevOpen.has(`${dateStr}|${c}|${s}`));
+          if (newCourts.length > 0) {
+            newlyOpened.push(`${SLOTS[s]}(${newCourts.join(',')}번)`);
+          }
+        }
+        if (newlyOpened.length > 0) {
+          alertsToSend.push({
+            dateStr,
+            title: `[빈자리] 성사전천후 ${dateStr}`,
+            body: newlyOpened.join(' / '),
+            url: `https://www.gytennis.or.kr/rsvDaily/4/${dateStr}`,
+          });
+        }
       }
-    } catch (e) {
-      debug.push({ dateStr, error: e.message });
     }
   }
 
@@ -207,9 +175,7 @@ export async function GET() {
 
   return NextResponse.json({
     status: 'ok',
-    checkedDates: candidateDates,
     openFound: currentOpen.size,
     alerts: alertsToSend.length,
-    debug,
   });
 }
