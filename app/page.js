@@ -62,5 +62,3 @@ export default function Home() {
     setDnd(nextDnd);
     await fetch('/api/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'dnd', dnd: nextDnd }) });
   }
-
-  const card = { background: '#fff', borderRadius: 12, padding: 16, marginBottom: 14, boxShadow: '0 1px
