@@ -5,7 +5,7 @@ import { redis } from '@/lib/redis';
 
 export const dynamic = 'force-dynamic';
 const SLOTS = ['06:00~08:00','08:00~10:00','10:00~12:00','12:00~14:00','14:00~16:00','16:00~18:00','18:00~20:00','20:00~22:00'];
-const COURTS = ['9', '10', '11'];
+const FACILITIES = { '1':'대화', '2':'삼송', '3':'성라', '4':'성사전천후', '5':'성사실외', '6':'중산', '7':'충장', '8':'킨텍스', '9':'토당', '10':'화정' };
 
 const getKst = () => new Date(Date.now() + 9 * 3600000);
 const inDnd = (d, k) => {
@@ -24,21 +24,28 @@ const matchDate = (s, r) => {
 
 export async function GET() {
   const kst = getKst();
+  await redis.set('last_heartbeat', { time: Date.now(), kst: kst.toISOString().replace('T', ' ').slice(0, 19) });
   const today = kst.toISOString().slice(0, 10);
   const dnd = (await redis.get('dnd')) || { enabled: true, start: '01:00', end: '05:30' };
-  if (inDnd(dnd, kst)) return NextResponse.json({ status: 'skipped_dnd', dates: [] });
+  if (inDnd(dnd, kst)) return NextResponse.json({ status: 'skipped_dnd', targets: [] });
 
   let rules = (await redis.get('rules')) || [];
   const valid = rules.filter((r) => r.mode !== 'date' || r.date >= today);
   if (valid.length !== rules.length) { await redis.set('rules', valid); rules = valid; }
-  if (!rules.length) return NextResponse.json({ status: 'no_rules', dates: [] });
+  if (!rules.length) return NextResponse.json({ status: 'no_rules', targets: [] });
 
-  const dates = [];
+  const targetSet = new Set();
   for (let i = 0; i <= 40; i++) {
     const ds = new Date(kst.getTime() + i * 86400000).toISOString().slice(0, 10);
-    if (rules.some((r) => matchDate(ds, r))) dates.push(ds);
+    for (const r of rules) {
+      if (matchDate(ds, r)) {
+        const facs = r.facilities?.length ? r.facilities : ['4'];
+        facs.forEach((f) => targetSet.add(`${f}|${ds}`));
+      }
+    }
   }
-  return NextResponse.json({ status: 'ok', dates });
+  const targets = Array.from(targetSet).map((x) => { const [f, d] = x.split('|'); return { f, d }; });
+  return NextResponse.json({ status: 'ok', targets });
 }
 
 export async function POST(req) {
@@ -50,37 +57,40 @@ export async function POST(req) {
   const curr = new Set();
   const alerts = [];
 
-  for (const [ds, html] of Object.entries(pages)) {
+  for (const [key, html] of Object.entries(pages)) {
+    const [fId, ds] = key.includes('|') ? key.split('|') : ['4', key];
+    const fName = FACILITIES[fId] || `코트${fId}`;
     const $ = cheerio.load(html);
     const open = {};
     $('table.innerCustom').each((_, tbl) => {
       const c = $(tbl).find('.courtTag').text().replace(/[^0-9]/g, '');
-      if (!COURTS.includes(c)) return;
+      if (!c || (fId === '4' && !['9', '10', '11'].includes(c))) return;
       $(tbl).find('tr').slice(1).each((i, tr) => {
         if ($(tr).find('.public-empty-slot').length > 0) {
           (open[i] ||= []).push(c);
-          curr.add(`${ds}|${c}|${i}`);
+          curr.add(`${fId}|${ds}|${c}|${i}`);
         }
       });
     });
 
-    for (const r of rules.filter((x) => matchDate(ds, x))) {
+    for (const r of rules.filter((x) => matchDate(ds, x) && (x.facilities?.length ? x.facilities : ['4']).includes(fId))) {
       const allowed = getSlots(r.timeType, r.exactSlot);
+      const url = `https://www.gytennis.or.kr/rsvDaily/${fId}/${ds}`;
       if (r.consecutiveOnly) {
         for (let i = 0; i < allowed.length - 1; i++) {
           const [s1, s2] = [allowed[i], allowed[i + 1]];
           if (s2 === s1 + 1 && open[s1]?.length && open[s2]?.length) {
-            if (open[s1].some((c) => !prev.has(`${ds}|${c}|${s1}`)) || open[s2].some((c) => !prev.has(`${ds}|${c}|${s2}`))) {
-              alerts.push({ dateStr: ds, title: `[연속 4시간] 성사전천후 ${ds}`, body: `${SLOTS[s1]}(${open[s1].join(',')}번) + ${SLOTS[s2]}(${open[s2].join(',')}번)`, url: `https://www.gytennis.or.kr/rsvDaily/4/${ds}` });
+            if (open[s1].some((c) => !prev.has(`${fId}|${ds}|${c}|${s1}`)) || open[s2].some((c) => !prev.has(`${fId}|${ds}|${c}|${s2}`))) {
+              alerts.push({ title: `[연속 4시간] ${fName} ${ds}`, body: `${SLOTS[s1]}(${open[s1].join(',')}번) + ${SLOTS[s2]}(${open[s2].join(',')}번)`, url });
             }
           }
         }
       } else {
         const newly = allowed.filter((s) => open[s]).map((s) => {
-          const nc = open[s].filter((c) => !prev.has(`${ds}|${c}|${s}`));
+          const nc = open[s].filter((c) => !prev.has(`${fId}|${ds}|${c}|${s}`));
           return nc.length ? `${SLOTS[s]}(${nc.join(',')}번)` : null;
         }).filter(Boolean);
-        if (newly.length) alerts.push({ dateStr: ds, title: `[빈자리] 성사전천후 ${ds}`, body: newly.join(' / '), url: `https://www.gytennis.or.kr/rsvDaily/4/${ds}` });
+        if (newly.length) alerts.push({ title: `[빈자리] ${fName} ${ds}`, body: newly.join(' / '), url });
       }
     }
   }
