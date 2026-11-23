@@ -62,3 +62,66 @@ export default function Home() {
     setDnd(nextDnd);
     await fetch('/api/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'dnd', dnd: nextDnd }) });
   }
+  const card = { background: '#fff', borderRadius: 12, padding: 16, marginBottom: 14, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' };
+
+  return (
+    <main style={{ maxWidth: 480, margin: '0 auto', padding: 16 }}>
+      <h2 style={{ margin: '8px 0 16px' }}>🎾 고양시 테니스장 빈자리 알림</h2>
+      <div style={card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>푸시 알림 상태: <b>{pushStatus}</b></span>
+          <button onClick={enablePush} style={{ background: '#1d4ed8', color: '#fff', border: 0, padding: '8px 14px', borderRadius: 8 }}>알림 켜기</button>
+        </div>
+      </div>
+
+      <form onSubmit={addRule} style={card}>
+        <h3 style={{ marginTop: 0 }}>감시 조건 추가</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 12 }}>
+          {FACS.map(([id, name]) => (
+            <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, padding: '4px 6px', background: facilities.includes(id) ? '#eff6ff' : '#f9fafb', borderRadius: 6 }}>
+              <input type="checkbox" checked={facilities.includes(id)} onChange={() => toggleFac(id)} />{name}
+            </label>
+          ))}
+        </div>
+        <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ width: '100%', padding: 8, marginBottom: 10 }}>
+          <option value="date">특정 날짜 지정</option><option value="weekly">매주 특정 요일</option><option value="monthly">매달 특정 일</option>
+        </select>
+        {mode === 'date' && <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '95%', padding: 8, marginBottom: 10 }} />}
+        {mode === 'weekly' && <select value={dayOfWeek} onChange={(e) => setDayOfWeek(Number(e.target.value))} style={{ width: '100%', padding: 8, marginBottom: 10 }}>{DAYS.map((d, i) => <option key={i} value={i}>매주 {d}요일</option>)}</select>}
+        {mode === 'monthly' && <input type="number" min="1" max="31" value={dayOfMonth} onChange={(e) => setDayOfMonth(Number(e.target.value))} style={{ width: '95%', padding: 8, marginBottom: 10 }} />}
+        <select value={timeType} onChange={(e) => setTimeType(e.target.value)} style={{ width: '100%', padding: 8, marginBottom: 10 }}>
+          <option value="all">전체 시간 (06~22시)</option><option value="morning">오전 (06~12시)</option><option value="afternoon">오후 (12~18시)</option><option value="evening">저녁 (18~22시)</option><option value="exact">정확한 회차 지정</option>
+        </select>
+        {timeType === 'exact' && <select value={exactSlot} onChange={(e) => setExactSlot(Number(e.target.value))} style={{ width: '100%', padding: 8, marginBottom: 10 }}>{SLOTS.map((s, i) => <option key={i} value={i}>{s}</option>)}</select>}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+          <input type="checkbox" checked={consecutiveOnly} onChange={(e) => setConsecutiveOnly(e.target.checked)} /><span>연속 2회차(4시간) 빈자리만 알림</span>
+        </label>
+        <button type="submit" style={{ width: '100%', background: '#111827', color: '#fff', border: 0, padding: 10, borderRadius: 8 }}>조건 등록하기</button>
+      </form>
+
+      <div style={card}>
+        <h3 style={{ marginTop: 0 }}>등록된 감시 목록 ({rules.length})</h3>
+        {!rules.length && <p style={{ color: '#6b7280' }}>등록된 조건이 없습니다.</p>}
+        {rules.map((r) => (
+          <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #eee' }}>
+            <div>
+              <div style={{ fontSize: 12, color: '#2563eb', fontWeight: 600 }}>{(r.facilities?.length ? r.facilities : ['4']).map((id) => FAC_MAP[id] || id).join(', ')}</div>
+              <b>{r.mode === 'date' ? r.date : r.mode === 'weekly' ? `매주 ${DAYS[r.dayOfWeek]}요일` : `매달 ${r.dayOfMonth}일`}</b>
+              <div style={{ fontSize: 13, color: '#4b5563' }}>
+                {r.timeType === 'exact' ? SLOTS[r.exactSlot] : r.timeType === 'all' ? '전체' : r.timeType === 'morning' ? '오전' : r.timeType === 'afternoon' ? '오후' : '저녁'}{r.consecutiveOnly ? ' · [연속 4시간]' : ''}
+              </div>
+            </div>
+            <button onClick={() => deleteRule(r.id)} style={{ background: '#ef4444', color: '#fff', border: 0, padding: '5px 10px', borderRadius: 6 }}>삭제</button>
+          </div>
+        ))}
+      </div>
+
+      <div style={card}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={dnd.enabled} onChange={(e) => saveDnd({ ...dnd, enabled: e.target.checked })} />
+          <b>방해 금지 시간 ({dnd.start} ~ {dnd.end})</b>
+        </label>
+      </div>
+    </main>
+  );
+}
